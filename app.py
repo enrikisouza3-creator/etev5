@@ -2082,6 +2082,7 @@ def render_microbiologia():
         st.rerun()
 render_microbiologia()
 f = df.drop_duplicates()
+ion("Ctrl+A → Ctrl+C para copiar tudo.")
 # =============================================================================
 #   CORREÇÃO DE pH — CALCULADORA DE DOSAGEM  (substitui a função anterior)
 #   Melhorias:
