@@ -1682,7 +1682,7 @@ REAGENTES = {
     "acido": {
         "MM": 98.08,
         "pureza": 0.60,
-        "densidade": 1.50,
+        "densidade": 1.33,
         "eq": 2,
         "nome": "Ácido sulfúrico 60%",
         "cor": "#EF5350"
@@ -1702,14 +1702,11 @@ def render_correcao_ph():
     st.markdown("---")
     st.header("⚗️ Correção de pH")
 
-    # =============================
-    # ENTRADAS — só o que importa
-    # =============================
     col1, col2, col3 = st.columns(3)
     with col1:
         ph_atual = st.number_input("pH atual", 0.0, 14.0, 12.0, 0.1)
     with col2:
-        ph_alvo = st.number_input("pH alvo", 0.0, 14.0, 7.0, 0.1)
+        ph_alvo  = st.number_input("pH alvo",  0.0, 14.0,  7.0, 0.1)
     with col3:
         vazao = st.number_input("Vazão de trabalho (m³/h)", 0.01, value=10.0)
 
@@ -1723,15 +1720,23 @@ def render_correcao_ph():
 
     # =============================
     # PASSO 1 — impacto do nítrico
+    # O nítrico é diluído no volume de 1h de vazão
+    # ex: 1700L nítrico em 1500 m³ = 1.500.000 L → concentração baixa
     # =============================
-    vol_L = vazao * 1000
+    acido_nitrico_kg = acido_nitrico_L * 1.33
 
-    kg_nitrico      = acido_nitrico_L * 1.33
-    mol_nitrico     = (kg_nitrico * 1000) / 63.0
-    mol_ativo       = mol_nitrico * 0.53
-    meqL_nitrico    = (mol_ativo * 1000) / vol_L if vol_L > 0 else 0.0
-    delta_nitrico   = meqL_nitrico / 0.2
-    ph_apos_nitrico = float(np.clip(ph_atual - delta_nitrico, 0, 14))
+    vol_efluente_L   = vazao * 1000           # L de efluente por hora
+
+    # mol de HNO3 puro (63% ativo, MM=63)
+    kg_hno3_puro     = acido_nitrico_kg * 0.63
+    mol_hno3         = (kg_hno3_puro * 1000) / 63.0
+
+    # concentração no efluente (mmol/L = meq/L pois HNO3 é monoprótico)
+    conc_hno3_meqL   = (mol_hno3 * 1000) / vol_efluente_L if vol_efluente_L > 0 else 0.0
+
+    # conversão meq/L → unidades de pH (modelo empírico: 1 meq/L ≈ 0.2 unidades pH)
+    delta_nitrico    = min(conc_hno3_meqL * 0.2, abs(ph_atual))
+    ph_apos_nitrico  = float(np.clip(ph_atual - delta_nitrico, 0.0, 14.0))
 
     # =============================
     # PASSO 2 — demanda restante
@@ -1740,69 +1745,75 @@ def render_correcao_ph():
 
     acido = REAGENTES["acido"]
     base  = REAGENTES["base"]
+
     conc_acido = (acido["pureza"] * acido["densidade"] * 1000 / acido["MM"]) * acido["eq"]
     conc_base  = (base["pureza"]  * base["densidade"]  * 1000 / base["MM"])  * base["eq"]
 
-    demanda    = abs(delta_restante) * 0.2
-    dose_acido = demanda / conc_acido  # L/m³
-    dose_base  = demanda / conc_base   # L/m³
+    demanda      = abs(delta_restante) * 0.2   # meq/L
+    dose_acido   = demanda / conc_acido        # L/m³
+    dose_base    = demanda / conc_base         # L/m³
 
-    # volume total tratado em 1h
-    val_acido_h = dose_acido * vazao   # L/h
-    val_base_h  = dose_base  * vazao   # L/h
+    # por hora
+    val_acido_lh  = dose_acido * vazao
+    val_base_lh   = dose_base  * vazao
+    val_acido_kgh = val_acido_lh * acido["densidade"]
+    val_base_kgh  = val_base_lh  * base["densidade"]
 
     # =============================
     # PASSO 3 — DECISÃO AUTOMÁTICA
-    # sistema decide modo e reagente
     # =============================
-
-    # pH ok
     if abs(delta_restante) < 0.05:
         st.success("✅ pH já está no alvo. Nenhuma dosagem necessária.")
         return
 
-    # precisa de ácido
     if delta_restante < 0:
-        reagente    = "acido"
-        nome_prod   = acido["nome"]
-        cor         = acido["cor"]
-        dose_ref    = dose_acido
-        val_hora    = val_acido_h
-        direcao     = -1
-        conc        = conc_acido
-    # precisa de soda
+        reagente  = "acido"
+        nome_prod = acido["nome"]
+        cor       = acido["cor"]
+        dose_ref  = dose_acido
+        val_lh    = val_acido_lh
+        val_kgh   = val_acido_kgh
+        dens      = acido["densidade"]
+        direcao   = -1
+        conc      = conc_acido
     else:
-        reagente    = "base"
-        nome_prod   = base["nome"]
-        cor         = base["cor"]
-        dose_ref    = dose_base
-        val_hora    = val_base_h
-        direcao     = 1
-        conc        = conc_base
+        reagente  = "base"
+        nome_prod = base["nome"]
+        cor       = base["cor"]
+        dose_ref  = dose_base
+        val_lh    = val_base_lh
+        val_kgh   = val_base_kgh
+        dens      = base["densidade"]
+        direcao   = 1
+        conc      = conc_base
 
-    # sistema decide o modo automaticamente
-    # desvio grande (>2 unidades) ou vazão baixa → dosagem única
-    # desvio pequeno e vazão alta → contínua
+    # modo automático
     if abs(delta_restante) >= 2.0 or vazao <= 20.0:
-        modo_auto     = "unica"
-        tempo_trat_h  = 1.0
-        vol_total     = vazao * tempo_trat_h
-        val_total     = dose_ref * vol_total
+        modo_auto = "unica"
+        vol_total = vazao * 1.0
+        val_L     = dose_ref * vol_total
+        val_kg    = val_L * dens
     else:
-        modo_auto    = "continua"
-        val_total    = val_hora
+        modo_auto = "continua"
+        val_L     = val_lh
+        val_kg    = val_kgh
+
+    unidade_l  = "L"   if modo_auto == "unica" else "L/h"
+    unidade_kg = "kg"  if modo_auto == "unica" else "kg/h"
+    modo_texto = "dosagem única no tanque" if modo_auto == "unica" else "dosagem contínua em linha"
 
     # =============================
     # RESULTADO VISUAL
     # =============================
     st.markdown("---")
 
-    # impacto do nítrico
     if acido_nitrico_L > 0:
         st.markdown(
             f"""<div style="background:#37474F;padding:14px;border-radius:8px;
                 color:white;margin-bottom:12px">
-                <b>🧪 Impacto do ácido nítrico da produção</b><br>
+                <b>🧪 Ácido nítrico da produção</b><br>
+                Volume: <b>{acido_nitrico_L:.1f} L</b> →
+                Peso: <b>{acido_nitrico_kg:.1f} kg</b><br>
                 pH entrada: <b>{ph_atual}</b> →
                 pH após nítrico: <b>{ph_apos_nitrico:.2f}</b>
                 (deslocou <b>{delta_nitrico:.2f}</b> unidades)
@@ -1810,28 +1821,47 @@ def render_correcao_ph():
             unsafe_allow_html=True
         )
 
-    # card do resultado
-    modo_texto = "dosagem única no tanque" if modo_auto == "unica" else "dosagem contínua em linha"
+    # card principal — L e kg juntos
     st.markdown(
         f"""<div style="background:{cor};padding:20px;border-radius:10px;
             color:white;margin-bottom:16px">
-            <div style="font-size:22px;font-weight:700">
+            <div style="font-size:20px;font-weight:700">
                 {'🔴' if reagente == 'acido' else '🔵'} {nome_prod}
             </div>
-            <div style="font-size:28px;font-weight:900;margin:10px 0">
-                {val_total:.2f} {'L' if modo_auto == 'unica' else 'L/h'}
-            </div>
-            <div style="font-size:14px;opacity:0.9">
-                Modo: {modo_texto}
+            <div style="font-size:16px;margin-top:8px">Modo: {modo_texto}</div>
+            <div style="display:flex;gap:40px;margin-top:12px">
+                <div>
+                    <div style="font-size:13px;opacity:0.85">Volume</div>
+                    <div style="font-size:32px;font-weight:900">{val_L:.2f} {unidade_l}</div>
+                </div>
+                <div>
+                    <div style="font-size:13px;opacity:0.85">Peso</div>
+                    <div style="font-size:32px;font-weight:900">{val_kg:.2f} {unidade_kg}</div>
+                </div>
             </div>
         </div>""",
         unsafe_allow_html=True
     )
 
-    # os dois valores sempre visíveis
+    # comparativo
+    st.caption("Comparativo dos dois reagentes:")
     col1, col2 = st.columns(2)
-    col1.metric("Ácido sulfúrico", f"{dose_acido * vazao:.2f} L/h")
-    col2.metric("Soda cáustica",   f"{dose_base  * vazao:.2f} L/h")
+    with col1:
+        st.markdown(
+            f"""<div style="background:#EF5350;padding:12px;border-radius:8px;color:white">
+                <b>🔴 Ácido sulfúrico</b><br>
+                {val_acido_lh:.2f} L/h &nbsp;|&nbsp; {val_acido_kgh:.2f} kg/h
+            </div>""",
+            unsafe_allow_html=True
+        )
+    with col2:
+        st.markdown(
+            f"""<div style="background:#42A5F5;padding:12px;border-radius:8px;color:white">
+                <b>🔵 Soda cáustica</b><br>
+                {val_base_lh:.2f} L/h &nbsp;|&nbsp; {val_base_kgh:.2f} kg/h
+            </div>""",
+            unsafe_allow_html=True
+        )
 
     # =============================
     # GRÁFICO
@@ -1888,23 +1918,30 @@ def render_correcao_ph():
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     motivo_nitrico = (
-        f"Foram informados {acido_nitrico_L:.0f} L de ácido nítrico "
-        f"adicionados pela produção, deslocando o pH de {ph_atual} para "
+        f"Foram adicionados {acido_nitrico_L:.0f} L ({acido_nitrico_kg:.1f} kg) "
+        f"de ácido nítrico pela produção, deslocando o pH de {ph_atual} para "
         f"{ph_apos_nitrico:.2f}. "
     ) if acido_nitrico_L > 0 else ""
+
+    direcao_texto = "acima" if delta_restante < 0 else "abaixo"
 
     if modo_auto == "unica":
         relatorio = f"""📋 RELATÓRIO DE CORREÇÃO DE pH
 Data/Hora: {agora}
 
 SITUAÇÃO:
-O efluente chegou com pH {ph_atual}, acima do valor alvo de {ph_alvo}. {motivo_nitrico}Devido ao desvio de {abs(delta_restante):.2f} unidades de pH, o sistema recomenda dosagem única diretamente no tanque.
+O efluente chegou com pH {ph_atual}, {direcao_texto} do valor alvo de {ph_alvo}. {motivo_nitrico}Devido ao desvio de {abs(delta_restante):.2f} unidades de pH, o sistema recomenda dosagem única no tanque.
 
 REAGENTE: {nome_prod}
-QUANTIDADE: {val_total:.2f} L
+→ Volume:  {val_L:.2f} L
+→ Peso:    {val_kg:.2f} kg
+
+ÁCIDO NÍTRICO (produção):
+→ Volume:  {acido_nitrico_L:.1f} L
+→ Peso:    {acido_nitrico_kg:.1f} kg
 
 PROCEDIMENTO:
-1. Adicionar {val_total:.2f} L de {nome_prod} no tanque
+1. Adicionar {val_L:.2f} L ({val_kg:.2f} kg) de {nome_prod} no tanque
 2. Aguardar homogeneização (mínimo 15 min)
 3. Medir o pH e confirmar resultado
 4. Se necessário, repetir em pequenas partes
@@ -1916,20 +1953,25 @@ PROCEDIMENTO:
 Data/Hora: {agora}
 
 SITUAÇÃO:
-O efluente chegou com pH {ph_atual}, acima do valor alvo de {ph_alvo}. {motivo_nitrico}Devido ao desvio de {abs(delta_restante):.2f} unidades de pH e vazão de {vazao:.1f} m³/h, o sistema recomenda dosagem contínua em linha.
+O efluente chegou com pH {ph_atual}, {direcao_texto} do valor alvo de {ph_alvo}. {motivo_nitrico}Com vazão de {vazao:.1f} m³/h, o sistema recomenda dosagem contínua em linha.
 
 REAGENTE: {nome_prod}
-VAZÃO DE DOSAGEM: {val_total:.2f} L/h
+→ Vazão:   {val_L:.2f} L/h
+→ Peso:    {val_kg:.2f} kg/h
+
+ÁCIDO NÍTRICO (produção):
+→ Volume:  {acido_nitrico_L:.1f} L
+→ Peso:    {acido_nitrico_kg:.1f} kg
 
 PROCEDIMENTO:
-1. Ajustar bomba dosadora para {val_total:.2f} L/h de {nome_prod}
+1. Ajustar bomba dosadora para {val_L:.2f} L/h ({val_kg:.2f} kg/h) de {nome_prod}
 2. Monitorar pH a cada 30 minutos
 3. Ajustar dosagem conforme necessário
 4. Registrar pH de entrada e saída
 
 ⚠️ Monitorar continuamente até pH estabilizar em {ph_alvo}."""
 
-    st.text_area("", value=relatorio, height=300,
+    st.text_area("", value=relatorio, height=320,
                  label_visibility="collapsed")
     st.caption("Ctrl+A → Ctrl+C para copiar.")
 
