@@ -2083,176 +2083,430 @@ def render_microbiologia():
 render_microbiologia()
 f = df.drop_duplicates()
 # =============================================================================
-#        CORREÇÃO DE pH — CALCULADORA DE DOSAGEM
+#   CORREÇÃO DE pH — CALCULADORA DE DOSAGEM  (substitui a função anterior)
+#   Melhorias:
+#     • Ácido Nítrico 53% adicionado (HNO₃)
+#     • Cálculo por VOLUME DO TANQUE (modo batelada) e por VAZÃO CONTÍNUA
+#     • Resposta direta: "Jogue X litros no tanque" ou "Dose Y L/h na linha"
+#     • Jar test virtual: tabela de ensaio de bancada
+#     • Custo estimado por dia
+#     • Passo a passo simplificado para o operador
 # =============================================================================
 
 def render_correcao_ph():
+    import numpy as np
+    import pandas as pd
+    import plotly.graph_objects as go
+    import streamlit as st
+
     st.markdown("---")
     st.header("⚗️ Correção de pH — Calculadora de Dosagem")
-    st.caption("Informe os parâmetros e o sistema calcula a dosagem necessária de ácido ou soda.")
+    st.caption(
+        "Informe os parâmetros do seu tanque ou linha e receba a resposta direta: "
+        "**quanto produto jogar** para atingir o pH alvo."
+    )
 
+    # ── Reagentes disponíveis ─────────────────────────────────────────────────
+    # Estrutura: nome_exibição -> {tipo, MM (g/mol), pureza (fração), densidade (g/mL), eq (equivalentes ácido-base)}
+    REAGENTES = {
+        "HNO₃ 53% (ácido nítrico — padrão da ETE)": {
+            "tipo": "acido", "MM": 63.01, "pureza": 0.53,
+            "densidade": 1.33, "eq": 1, "nome_curto": "HNO₃ 53%",
+            "custo_ref": 3.50,   # R$/L — ajuste conforme contrato
+            "cor": "#FF7043",
+        },
+        "H₂SO₄ 98% (ácido sulfúrico)": {
+            "tipo": "acido", "MM": 98.08, "pureza": 0.98,
+            "densidade": 1.84, "eq": 2, "nome_curto": "H₂SO₄ 98%",
+            "custo_ref": 2.00,
+            "cor": "#EF5350",
+        },
+        "HCl 33% (ácido clorídrico)": {
+            "tipo": "acido", "MM": 36.46, "pureza": 0.33,
+            "densidade": 1.16, "eq": 1, "nome_curto": "HCl 33%",
+            "custo_ref": 4.00,
+            "cor": "#AB47BC",
+        },
+        "NaOH 50% (soda cáustica líquida)": {
+            "tipo": "base", "MM": 40.00, "pureza": 0.50,
+            "densidade": 1.525, "eq": 1, "nome_curto": "NaOH 50%",
+            "custo_ref": 3.00,
+            "cor": "#42A5F5",
+        },
+        "NaOH 99% (soda cáustica sólida)": {
+            "tipo": "base", "MM": 40.00, "pureza": 0.99,
+            "densidade": 1.00, "eq": 1, "nome_curto": "NaOH 99%",
+            "custo_ref": 8.00,
+            "cor": "#26C6DA",
+        },
+        "Ca(OH)₂ (cal hidratada — pó 70%)": {
+            "tipo": "base", "MM": 74.09, "pureza": 0.70,
+            "densidade": 1.00, "eq": 2, "nome_curto": "Cal 70%",
+            "custo_ref": 1.50,
+            "cor": "#66BB6A",
+        },
+    }
+
+    # ── Modo de operação ─────────────────────────────────────────────────────
+    modo_op = st.radio(
+        "Modo de operação",
+        ["🪣 Batelada (corrigir um tanque cheio)", "🔄 Contínuo (linha / bomba dosadora)"],
+        horizontal=True,
+    )
+    modo_batelada = "Batelada" in modo_op
+
+    # ── Inputs principais ────────────────────────────────────────────────────
     col1, col2, col3 = st.columns(3)
     with col1:
-        ph_atual = st.number_input("pH atual", min_value=0.0, max_value=14.0, value=7.0, step=0.1)
+        ph_atual = st.number_input("pH atual (medido)", min_value=0.0, max_value=14.0,
+                                   value=8.5, step=0.1, format="%.1f")
     with col2:
-        ph_alvo  = st.number_input("pH alvo", min_value=0.0, max_value=14.0, value=7.0, step=0.1)
+        ph_alvo = st.number_input("pH alvo (desejado)", min_value=0.0, max_value=14.0,
+                                  value=7.0, step=0.1, format="%.1f")
     with col3:
-        vazao    = st.number_input("Vazão (m³/h)", min_value=0.1, value=10.0, step=0.5)
+        if modo_batelada:
+            volume_tanque = st.number_input("Volume do tanque (m³)", min_value=0.1,
+                                            value=100.0, step=10.0)
+            vazao = None
+        else:
+            vazao = st.number_input("Vazão da linha (m³/h)", min_value=0.01,
+                                    value=10.0, step=0.5)
+            volume_tanque = None
 
     col4, col5 = st.columns(2)
     with col4:
-        reagente = st.selectbox("Reagente disponível", [
-            "H₂SO₄ 98% (ácido sulfúrico)",
-            "HCl 33% (ácido clorídrico)",
-            "NaOH 50% (soda cáustica líquida)",
-            "NaOH 99% (soda cáustica sólida)",
-        ])
+        reagente = st.selectbox("Reagente disponível", list(REAGENTES.keys()), index=0)
     with col5:
-        alcalinidade = st.number_input("Alcalinidade estimada (mg CaCO₃/L)", min_value=0.0, value=200.0, step=10.0,
-                                       help="Alcalinidade total do efluente. Se não souber, use 200 mg/L como referência.")
+        alcalinidade = st.number_input(
+            "Alcalinidade total (mg CaCO₃/L)",
+            min_value=0.0, value=200.0, step=10.0,
+            help=(
+                "Alcalinidade medida no laboratório (ou estimada). "
+                "Quanto maior, mais reagente ácido será necessário para vencer o tampão. "
+                "Efluente doméstico típico: 150–350 mg/L."
+            ),
+        )
 
-    calcular = st.button("🧮 Calcular dosagem", type="primary", use_container_width=True)
+    # Opção avançada: fator de segurança
+    with st.expander("⚙️ Configurações avançadas", expanded=False):
+        fator_seg = st.slider(
+            "Fator de segurança (multiplicador da dose calculada)",
+            min_value=1.0, max_value=2.0, value=1.15, step=0.05,
+            help="1.0 = dose exata teórica. 1.15 = +15% de margem (recomendado para primeira dosagem).",
+        )
+        eficiencia_mistura = st.slider(
+            "Eficiência de mistura estimada (%)",
+            min_value=50, max_value=100, value=85, step=5,
+            help="100% = mistura perfeita. Tanques sem agitação ≈ 70–80%.",
+        )
+        custo_kwh = st.number_input("Custo da bomba dosadora (R$/h)", value=0.30, step=0.05,
+                                    help="Para incluir no custo total estimado.")
 
+    calcular = st.button("🧮 Calcular — quanto produto jogar?", type="primary", use_container_width=True)
     if not calcular:
-        st.info("Preencha os campos acima e clique em **Calcular dosagem**.")
+        st.info("💡 Preencha os campos e clique em **Calcular** para receber a resposta direta.")
         return
 
+    # ── Validações ───────────────────────────────────────────────────────────
     delta_ph = ph_alvo - ph_atual
+    cfg = REAGENTES[reagente]
 
     if abs(delta_ph) < 0.05:
-        st.success("✅ pH já está no alvo! Nenhuma correção necessária.")
+        st.success("✅ pH já está no alvo. Nenhuma ação necessária.")
         return
-
-    REAGENTES = {
-        "H₂SO₄ 98% (ácido sulfúrico)":      {"tipo": "acido", "MM": 98.08,  "pureza": 0.98, "densidade": 1.84,  "eq": 2, "nome_curto": "H₂SO₄ 98%"},
-        "HCl 33% (ácido clorídrico)":         {"tipo": "acido", "MM": 36.46,  "pureza": 0.33, "densidade": 1.16,  "eq": 1, "nome_curto": "HCl 33%"},
-        "NaOH 50% (soda cáustica líquida)":   {"tipo": "base",  "MM": 40.00,  "pureza": 0.50, "densidade": 1.525, "eq": 1, "nome_curto": "NaOH 50%"},
-        "NaOH 99% (soda cáustica sólida)":    {"tipo": "base",  "MM": 40.00,  "pureza": 0.99, "densidade": 1.0,   "eq": 1, "nome_curto": "NaOH 99%"},
-    }
-
-    cfg = REAGENTES[reagente]
-    tipo = cfg["tipo"]
 
     precisa_acido = delta_ph < 0
-    precisa_base  = delta_ph > 0
-
-    if precisa_acido and tipo == "base":
-        st.error("❌ O pH alvo é menor que o atual (precisa acidificar), mas o reagente selecionado é uma **base**. Selecione um ácido.")
+    if precisa_acido and cfg["tipo"] == "base":
+        st.error(
+            "❌ Para **descer** o pH você precisa de um **ácido**, "
+            "mas selecionou uma base. Mude o reagente."
+        )
         return
-    if precisa_base and tipo == "acido":
-        st.error("❌ O pH alvo é maior que o atual (precisa alcalinizar), mas o reagente selecionado é um **ácido**. Selecione uma base.")
+    if not precisa_acido and cfg["tipo"] == "acido":
+        st.error(
+            "❌ Para **subir** o pH você precisa de uma **base**, "
+            "mas selecionou um ácido. Mude o reagente."
+        )
         return
 
-    vazao_lh = vazao * 1000
+    # ── Cálculo da demanda (meq/L) ───────────────────────────────────────────
+    # Concentração do reagente em meq/mL
+    conc_meq_mL = (cfg["pureza"] * cfg["densidade"] * 1000.0 / cfg["MM"]) * cfg["eq"]
 
-    if tipo == "acido":
-        alc_meq_L = alcalinidade / 50.0
+    if cfg["tipo"] == "acido":
+        # Demanda = neutralizar alcalinidade + ajuste de [H⁺]
+        alc_meq_L = alcalinidade / 50.0          # 1 meq CaCO₃ = 50 mg
         h_alvo    = 10 ** (-ph_alvo)
         h_atual   = 10 ** (-ph_atual)
-        delta_h   = (h_alvo - h_atual) * 1000
-        demanda_meq_L = alc_meq_L + max(delta_h, 0)
+        demanda_meq_L = alc_meq_L + max((h_alvo - h_atual) * 1000.0, 0.0)
     else:
-        oh_alvo   = 10 ** (-(14 - ph_alvo))
-        oh_atual  = 10 ** (-(14 - ph_atual))
-        delta_oh  = (oh_alvo - oh_atual) * 1000
-        fator_buffer = max(1.0 - alcalinidade / 500.0, 0.2)
-        demanda_meq_L = max(delta_oh, 0) * fator_buffer + 0.1 * abs(delta_ph)
+        # Para base: estimativa baseada no delta de pOH + fator tampão residual
+        oh_alvo  = 10 ** (-(14.0 - ph_alvo))
+        oh_atual = 10 ** (-(14.0 - ph_atual))
+        fator_buffer = max(1.0 - alcalinidade / 600.0, 0.15)
+        demanda_meq_L = max((oh_alvo - oh_atual) * 1000.0, 0.0) * fator_buffer + 0.08 * abs(delta_ph)
 
-    conc_meq_mL = (cfg["pureza"] * cfg["densidade"] * 1000 / cfg["MM"]) * cfg["eq"]
-    dose_mL_L   = demanda_meq_L / conc_meq_mL
-    vazao_dosagem_mLh = dose_mL_L * vazao_lh
-    vazao_dosagem_Lh  = vazao_dosagem_mLh / 1000
+    # Aplica eficiência de mistura e fator de segurança
+    efic = eficiencia_mistura / 100.0
+    demanda_corrigida = demanda_meq_L / efic * fator_seg
 
-    CUSTO_REF = {
-        "H₂SO₄ 98% (ácido sulfúrico)":      2.0,
-        "HCl 33% (ácido clorídrico)":         4.0,
-        "NaOH 50% (soda cáustica líquida)":   3.0,
-        "NaOH 99% (soda cáustica sólida)":    8.0,
-    }
-    custo_h = vazao_dosagem_Lh * CUSTO_REF[reagente]
+    # ── Dose por litro de efluente (mL produto / L efluente) ────────────────
+    dose_mL_por_L = demanda_corrigida / conc_meq_mL       # mL produto / L efluente
+    dose_L_por_m3 = dose_mL_por_L                         # L produto / m³  (numericamente igual: 1 mL/L = 1 L/m³)
 
+    # ── Resultado final ──────────────────────────────────────────────────────
+    if modo_batelada:
+        vol_produto_L  = dose_L_por_m3 * volume_tanque
+        vol_produto_mL = vol_produto_L * 1000.0
+        massa_produto_kg = vol_produto_L * cfg["densidade"] * cfg["pureza"]  # kg de reagente puro
+    else:
+        vazao_produto_L_h  = dose_L_por_m3 * vazao
+        vazao_produto_mL_h = vazao_produto_L_h * 1000.0
+        vol_dia_L          = vazao_produto_L_h * 24.0
+        massa_dia_kg       = vol_dia_L * cfg["densidade"] * cfg["pureza"]
+
+    # ── CAIXA DE RESPOSTA DIRETA (destaque máximo) ───────────────────────────
     st.markdown("---")
-    st.subheader("📊 Resultado")
+    acao_txt = "DESCER" if precisa_acido else "SUBIR"
+    st.subheader(f"📣 Resposta Direta — para {acao_txt} o pH de {ph_atual} → {ph_alvo}")
 
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Dosagem por m³",    f"{dose_mL_L * 1000:.1f} mL/m³")
-    r2.metric("Vazão de dosagem",  f"{vazao_dosagem_mLh:.0f} mL/h")
-    r3.metric("Vazão de dosagem",  f"{vazao_dosagem_Lh:.3f} L/h")
-    r4.metric("Custo estimado",    f"R$ {custo_h:.2f}/h")
+    cor_destaque = cfg["cor"]
 
-    if abs(delta_ph) > 3:
-        st.warning("⚠️ Delta de pH alto (> 3 unidades). Recomenda-se **jar test** para confirmar a dosagem antes de aplicar.")
-    elif abs(delta_ph) > 1.5:
-        st.info("ℹ️ Delta de pH moderado. Faça uma verificação pontual após 15 min de dosagem.")
+    if modo_batelada:
+        st.markdown(
+            f"""
+<div style="background:{cor_destaque};border-radius:12px;padding:22px 26px;color:white;margin-bottom:16px;">
+  <div style="font-size:13px;opacity:0.85;letter-spacing:1px;text-transform:uppercase">
+    Tanque de {volume_tanque:.0f} m³ · {cfg['nome_curto']}
+  </div>
+  <div style="font-size:36px;font-weight:800;margin:8px 0">
+    Adicione {vol_produto_L:.2f} L
+    <span style="font-size:18px;opacity:0.85">({vol_produto_mL:.0f} mL)</span>
+  </div>
+  <div style="font-size:14px;opacity:0.9">
+    ≈ {vol_produto_L / 1.0:.2f} L de produto comercial diretamente no tanque
+    &nbsp;·&nbsp; misture bem por pelo menos 5 min antes de medir o pH novamente
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
     else:
-        st.success("✅ Correção pequena. Alta confiança no cálculo.")
+        st.markdown(
+            f"""
+<div style="background:{cor_destaque};border-radius:12px;padding:22px 26px;color:white;margin-bottom:16px;">
+  <div style="font-size:13px;opacity:0.85;letter-spacing:1px;text-transform:uppercase">
+    Linha contínua · {vazao:.1f} m³/h · {cfg['nome_curto']}
+  </div>
+  <div style="font-size:36px;font-weight:800;margin:8px 0">
+    Dosar {vazao_produto_L_h:.3f} L/h
+    <span style="font-size:18px;opacity:0.85">({vazao_produto_mL_h:.1f} mL/h)</span>
+  </div>
+  <div style="font-size:14px;opacity:0.9">
+    = {dose_L_por_m3 * 1000:.1f} mL por m³ tratado
+    &nbsp;·&nbsp; configure a bomba dosadora para essa vazão
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
 
-    with st.expander("💡 Por que esse resultado? (explicação passo a passo)", expanded=True):
-        acao = "acidificar" if tipo == "acido" else "alcalinizar"
-        st.markdown(f"""
-**1. O que precisa acontecer?**
-O pH atual é **{ph_atual}** e você quer chegar em **{ph_alvo}** — precisa **{acao}** o efluente.
+    # ── Métricas resumidas ───────────────────────────────────────────────────
+    if modo_batelada:
+        custo_total = vol_produto_L * cfg["custo_ref"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Volume a adicionar",    f"{vol_produto_L:.2f} L")
+        c2.metric("Em mL",                 f"{vol_produto_mL:.0f} mL")
+        c3.metric("Massa de reagente puro", f"{massa_produto_kg:.2f} kg")
+        c4.metric("Custo estimado (produto)", f"R$ {custo_total:.2f}")
+    else:
+        custo_produto_dia = vol_dia_L * cfg["custo_ref"]
+        custo_total_dia   = custo_produto_dia + custo_kwh * 24.0
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Vazão dosadora",      f"{vazao_produto_L_h:.3f} L/h")
+        c2.metric("Dose por m³",         f"{dose_L_por_m3 * 1000:.1f} mL/m³")
+        c3.metric("Volume / dia",        f"{vol_dia_L:.1f} L/dia")
+        c4.metric("Custo total / dia",   f"R$ {custo_total_dia:.2f}/dia")
 
-**2. Capacidade tampão do efluente**
-A alcalinidade de **{alcalinidade:.0f} mg CaCO₃/L** age como um "amortecedor" — parte do reagente vai ser consumida só para vencer esse tampão antes do pH começar a mudar.
-{"Em termos práticos: são **" + f"{alcalinidade/50:.2f}" + " meq/L** de alcalinidade a neutralizar." if tipo == "acido" else "Para subir pH, a alcalinidade natural já ajuda um pouco — por isso o cálculo desconta parte dela."}
+    # ── Passo a passo para o operador ────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🧑‍🔧 Passo a Passo para o Operador")
 
-**3. Concentração do reagente ({cfg['nome_curto']})**
-Com pureza de **{cfg['pureza']*100:.0f}%** e densidade de **{cfg['densidade']} g/mL**, cada mL do reagente contém **{conc_meq_mL:.2f} meq** de {"H⁺" if tipo == "acido" else "OH⁻"}.
+    if modo_batelada:
+        passos = [
+            f"1️⃣  Meça o pH atual com o pHmetro calibrado — confirme que está em **{ph_atual}**.",
+            f"2️⃣  Use um recipiente graduado e separe **{vol_produto_L:.2f} L** de {cfg['nome_curto']}.",
+            "3️⃣  Com EPI completo (luvas, óculos, avental), adicione o produto **lentamente** pela borda do tanque.",
+            "4️⃣  Aguarde a mistura se homogeneizar (**mínimo 5 min** com aeração ligada).",
+            f"5️⃣  Meça o pH novamente. O alvo é **{ph_alvo}**.",
+            f"6️⃣  Se necessário, adicione mais **10–20%** (≈ {vol_produto_L * 0.15:.2f} L) e repita a medição.",
+            "7️⃣  Registre pH final, volume total utilizado e horário no formulário.",
+        ]
+    else:
+        passos = [
+            f"1️⃣  Verifique o pH de entrada da linha — deve estar em torno de **{ph_atual}**.",
+            f"2️⃣  Configure a bomba dosadora para **{vazao_produto_mL_h:.1f} mL/h** ({vazao_produto_L_h:.3f} L/h).",
+            "3️⃣  Confirme que a linha de dosagem está antes do ponto de mistura e que há agitação adequada.",
+            "4️⃣  Ligue a bomba e aguarde **10–15 min** para estabilizar.",
+            f"5️⃣  Meça o pH na saída do ponto de mistura — deve estar próximo de **{ph_alvo}**.",
+            "6️⃣  Ajuste a vazão da bomba em ±10% conforme necessário.",
+            "7️⃣  Registre os valores no formulário de controle operacional.",
+        ]
 
-**4. Dosagem calculada**
-Dividindo a demanda total pela concentração do reagente: **{dose_mL_L*1000:.1f} mL** por cada **m³** de efluente tratado.
+    for p in passos:
+        st.markdown(p)
 
-**5. Vazão de dosagem**
-Com vazão de **{vazao} m³/h** → **{vazao * 1000:.0f} L/h** de efluente:
-→ Dosar **{vazao_dosagem_mLh:.0f} mL/h** ({vazao_dosagem_Lh:.3f} L/h) de {cfg['nome_curto']}.
+    # ── Jar test virtual (tabela de dosagens para testar em bancada) ─────────
+    st.markdown("---")
+    st.subheader("🧪 Jar Test Virtual — Tabela de Dosagens para Bancada")
+    st.caption(
+        "Antes de dosagem em escala real, simule em bancada com 1 L de amostra. "
+        "A tabela mostra quanto produto adicionar para diferentes doses."
+    )
 
-> ⚠️ Este cálculo é uma **estimativa de partida**. Sempre verifique o pH após ~15 min de dosagem e ajuste se necessário. Para grandes correções, faça jar test.
-        """)
-
-    st.subheader("📈 Curva de Titulação Estimada")
-    doses = np.linspace(0, dose_mL_L * 1000 * 2.5, 200)
-    phs_curva = []
-    for d in doses:
-        meq_adicionado = d * conc_meq_mL / 1000
-        if tipo == "acido":
-            alc_restante = max(alcalinidade / 50.0 - meq_adicionado, 0)
-            if meq_adicionado > alcalinidade / 50.0:
-                h = (meq_adicionado - alcalinidade / 50.0) * 1e-3
-                h = max(h, 1e-14)
-                ph_estimado = -np.log10(h)
-            else:
-                frac = meq_adicionado / (alcalinidade / 50.0 + 1e-9)
-                ph_estimado = ph_atual - (ph_atual - ph_alvo) * (frac ** 0.5)
+    fatores = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+    jar_data = []
+    for f in fatores:
+        dose_1L_mL = dose_mL_por_L * f
+        if dose_1L_mL < 1.0:
+            dose_fmt = f"{dose_1L_mL * 1000:.1f} µL"
         else:
-            frac = min(meq_adicionado / max(demanda_meq_L, 1e-6), 1.0)
-            ph_estimado = ph_atual + (ph_alvo - ph_atual) * (frac ** 0.6)
-        phs_curva.append(np.clip(ph_estimado, 0, 14))
+            dose_fmt = f"{dose_1L_mL:.2f} mL"
+        jar_data.append({
+            "Fator": f"× {f:.2f}",
+            "Dose em 1 L de amostra": dose_fmt,
+            "Dose em 10 L de amostra": f"{dose_1L_mL * 10:.2f} mL",
+            f"Equivalente p/ {volume_tanque if modo_batelada else vazao} {'m³ (tanque)' if modo_batelada else 'm³/h (linha)'}":
+                f"{dose_L_por_m3 * f * (volume_tanque if modo_batelada else vazao):.2f} L",
+            "pH esperado (estimado)": f"~{min(max(ph_atual + delta_ph * f, 0), 14):.1f}",
+        })
 
-    fig_tit = go.Figure()
-    fig_tit.add_trace(go.Scatter(x=doses, y=phs_curva, mode="lines", line=dict(color="#1565C0", width=2), name="pH estimado"))
-    fig_tit.add_hline(y=ph_alvo,  line_dash="dash", line_color="green", annotation_text=f"pH alvo ({ph_alvo})")
-    fig_tit.add_hline(y=ph_atual, line_dash="dot",  line_color="gray",  annotation_text=f"pH atual ({ph_atual})")
-    fig_tit.add_vline(x=dose_mL_L * 1000, line_dash="dash", line_color="red", annotation_text=f"Dose calculada ({dose_mL_L*1000:.1f} mL/m³)")
-    fig_tit.update_layout(
-        xaxis_title="Dose de reagente (mL/m³)",
+    st.dataframe(pd.DataFrame(jar_data), use_container_width=True, hide_index=True)
+    st.caption(
+        "💡 Dica: adicione a dose do fator 1.0 em 1 L de amostra, meça o pH após 2 min de agitação. "
+        "Se ficou acima do alvo, use fator menor; se ficou abaixo, use fator maior."
+    )
+
+    # ── Gráfico: curva pH × dose ──────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📈 Curva pH × Dose (estimada)")
+
+    doses = np.linspace(0, dose_L_por_m3 * 2.5 * 1000, 300)  # mL/m³
+    phs_curva = []
+    for d_mLm3 in doses:
+        d_meq_L = (d_mLm3 / 1000.0) * conc_meq_mL
+        if cfg["tipo"] == "acido":
+            alc_rest = max(alcalinidade / 50.0 - d_meq_L, 0.0)
+            if d_meq_L > alcalinidade / 50.0:
+                h_exc = max((d_meq_L - alcalinidade / 50.0) * 1e-3, 1e-14)
+                ph_est = -np.log10(h_exc)
+            else:
+                frac = d_meq_L / (alcalinidade / 50.0 + 1e-9)
+                ph_est = ph_atual - abs(delta_ph) * (frac ** 0.55)
+        else:
+            demanda_total = max(demanda_meq_L, 1e-6)
+            frac = min(d_meq_L / demanda_total, 1.0)
+            ph_est = ph_atual + abs(delta_ph) * (frac ** 0.6)
+        phs_curva.append(float(np.clip(ph_est, 0, 14)))
+
+    dose_calc_mLm3 = dose_L_por_m3 * 1000.0
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=doses, y=phs_curva, mode="lines",
+        line=dict(color=cfg["cor"], width=3), name="pH estimado"
+    ))
+    fig.add_hline(y=ph_alvo,  line_dash="dash", line_color="#43A047",
+                  annotation_text=f"pH alvo ({ph_alvo})", annotation_position="right")
+    fig.add_hline(y=ph_atual, line_dash="dot",  line_color="#9E9E9E",
+                  annotation_text=f"pH atual ({ph_atual})", annotation_position="right")
+    fig.add_vline(x=dose_calc_mLm3, line_dash="dash", line_color="#E53935",
+                  annotation_text=f"Dose calculada ({dose_calc_mLm3:.1f} mL/m³)",
+                  annotation_position="top left")
+
+    fig.update_layout(
+        xaxis_title=f"Dose de {cfg['nome_curto']} (mL por m³ de efluente)",
         yaxis_title="pH estimado",
-        height=350,
-        margin=dict(l=10, r=10, t=20, b=10),
+        height=360,
         yaxis=dict(range=[0, 14]),
+        margin=dict(l=10, r=10, t=20, b=10),
+        showlegend=False,
     )
-    st.plotly_chart(fig_tit, use_container_width=True, key="plot-titulacao-ph")
+    st.plotly_chart(fig, use_container_width=True, key="plot-titulacao-ph-v2")
 
-    st.subheader("📝 Resumo para relatório / WhatsApp")
-    resumo = (
-        f"⚗️ Correção de pH — {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}\n"
-        f"pH atual: {ph_atual} → pH alvo: {ph_alvo}\n"
-        f"Vazão: {vazao} m³/h\n"
-        f"Reagente: {cfg['nome_curto']}\n"
-        f"Dosagem: {dose_mL_L*1000:.1f} mL/m³\n"
-        f"Vazão de dosagem: {vazao_dosagem_mLh:.0f} mL/h ({vazao_dosagem_Lh:.3f} L/h)\n"
-        f"Custo estimado: R$ {custo_h:.2f}/h"
+    # ── Alertas de segurança ──────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("⚠️ Segurança e Cuidados")
+
+    alertas_acido = {
+        "HNO₃ 53% (ácido nítrico — padrão da ETE)": [
+            "🔴 Ácido nítrico é **oxidante forte** — nunca misture com materiais orgânicos ou outros ácidos.",
+            "🧤 EPI obrigatório: luvas nitrílicas duplas, óculos de proteção, avental impermeável.",
+            "💨 Use em local ventilado — vapores de NO₂ são tóxicos.",
+            "🚿 Em caso de contato com pele: lavar com água corrente por no mínimo 15 min.",
+        ],
+        "H₂SO₄ 98% (ácido sulfúrico)": [
+            "🔴 Ácido sulfúrico concentrado é **extremamente corrosivo** e reage violentamente com água.",
+            "🧤 EPI: luvas de borracha espessa, óculos de proteção, face shield.",
+            "💧 SEMPRE adicione ácido na água, NUNCA água no ácido.",
+        ],
+        "HCl 33% (ácido clorídrico)": [
+            "🟠 Libera vapores de HCl — use em área ventilada.",
+            "🧤 EPI: luvas nitrílicas, óculos de proteção.",
+        ],
+        "NaOH 50% (soda cáustica líquida)": [
+            "🟠 Soda cáustica causa queimaduras severas — evite contato com pele e olhos.",
+            "🧤 EPI: luvas de borracha, óculos de proteção.",
+        ],
+        "NaOH 99% (soda cáustica sólida)": [
+            "🟠 Sólido higroscópico — reage com umidade do ar liberando calor.",
+            "🧤 EPI: luvas de borracha, máscara de pó.",
+        ],
+        "Ca(OH)₂ (cal hidratada — pó 70%)": [
+            "🟡 Pó irritante para vias respiratórias — use máscara PFF2 ao manusear.",
+            "🧤 EPI: luvas de borracha, óculos de proteção.",
+        ],
+    }
+    for alerta in alertas_acido.get(reagente, []):
+        st.markdown(alerta)
+
+    # ── Resumo copiável ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📝 Resumo para WhatsApp / Relatório")
+
+    if modo_batelada:
+        resumo_linhas = [
+            f"⚗️ Correção de pH — {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}",
+            f"Tanque: {volume_tanque:.0f} m³  |  pH: {ph_atual} → {ph_alvo}",
+            f"Reagente: {cfg['nome_curto']}",
+            f"",
+            f"✅ ADICIONAR: {vol_produto_L:.2f} L  ({vol_produto_mL:.0f} mL)",
+            f"Massa de reagente puro: {massa_produto_kg:.2f} kg",
+            f"Custo estimado: R$ {vol_produto_L * cfg['custo_ref']:.2f}",
+            f"",
+            f"Procedimento: adicionar lentamente com EPI, misturar por 5 min, medir pH.",
+            f"Fator de segurança aplicado: {fator_seg:.0%}  |  Eficiência de mistura: {eficiencia_mistura}%",
+        ]
+    else:
+        resumo_linhas = [
+            f"⚗️ Correção de pH — {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}",
+            f"Linha: {vazao:.1f} m³/h  |  pH: {ph_atual} → {ph_alvo}",
+            f"Reagente: {cfg['nome_curto']}",
+            f"",
+            f"✅ DOSAGEM: {vazao_produto_L_h:.3f} L/h  ({vazao_produto_mL_h:.1f} mL/h)",
+            f"Dose por m³: {dose_L_por_m3 * 1000:.1f} mL/m³",
+            f"Consumo diário: {vol_dia_L:.1f} L/dia",
+            f"Custo produto/dia: R$ {custo_produto_dia:.2f}",
+            f"",
+            f"Configurar bomba dosadora para {vazao_produto_mL_h:.1f} mL/h.",
+            f"Fator de segurança: {fator_seg:.0%}  |  Eficiência de mistura: {eficiencia_mistura}%",
+        ]
+
+    st.text_area(
+        "",
+        value="\n".join(resumo_linhas),
+        height=200,
+        label_visibility="collapsed",
+        key="ta_ph_resumo_v2",
     )
-    st.text_area("", value=resumo, height=160, label_visibility="collapsed", key="ta_ph_resumo")
-    st.caption("Ctrl+A → Ctrl+C para copiar.")
-render_correcao_ph()
+    st.caption("Ctrl+A → Ctrl+C para copiar tudo.")
