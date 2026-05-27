@@ -54,7 +54,7 @@ KW_OXIG      = ["oxigenacao", "oxigenação"]
 # Grupos adicionais
 KW_NIVEIS_OUTROS = ["nivel", "nível"]
 KW_VAZAO         = ["vazao", "vazão"]
-KW_PH            = ["ph "]
+KW_PH            = ["ph ", " ph", "ph-", "ph_"]
 KW_SST           = ["sst ", " sst", "ss "]
 KW_DQO           = ["dqo ", " dqo"]
 KW_ESTADOS       = ["decanter", "desvio", "tempo de desc", "volante"]
