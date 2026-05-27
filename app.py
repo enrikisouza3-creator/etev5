@@ -1670,10 +1670,12 @@ def render_microbiologia():
         st.rerun()
 
 render_microbiologia()
-
 # =============================================================================
 #   CORREÇÃO DE pH — CALCULADORA DE DOSAGEM
 # =============================================================================
+
+import numpy as np
+import plotly.graph_objects as go
 
 REAGENTES = {
     "H₂SO₄ 60% (ácido sulfúrico)": {
@@ -1683,6 +1685,7 @@ REAGENTES = {
         "densidade": 1.50,
         "eq": 2,
         "nome_curto": "ácido 60%",
+        "cor": "#EF5350"
     },
     "NaOH 15% (soda cáustica)": {
         "tipo": "base",
@@ -1691,6 +1694,7 @@ REAGENTES = {
         "densidade": 1.16,
         "eq": 1,
         "nome_curto": "soda 15%",
+        "cor": "#42A5F5"
     }
 }
 
@@ -1698,27 +1702,16 @@ REAGENTES = {
 def render_correcao_ph():
 
     st.markdown("---")
-    st.header("⚗️ Correção de pH — Calculadora de Dosagem")
+    st.header("⚗️ Correção de pH — Calculadora")
 
-    st.caption(
-        "Informe os parâmetros do seu tanque ou linha e receba a resposta direta: "
-        "**quanto produto dosar** para atingir o pH alvo."
-    )
-
-    # =============================
-    # MODO
-    # =============================
-    modo_op = st.radio(
-        "Modo de operação",
+    modo = st.radio(
+        "Modo",
         ["Tanque (dosagem única)", "Linha (dosagem contínua)"],
         horizontal=True,
     )
 
-    modo_batelada = "Tanque" in modo_op
+    modo_batelada = "Tanque" in modo
 
-    # =============================
-    # ENTRADAS
-    # =============================
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -1729,68 +1722,104 @@ def render_correcao_ph():
 
     with col3:
         if modo_batelada:
-            volume_tanque = st.number_input("Volume do tanque (m³)", 0.1, value=100.0)
+            volume = st.number_input("Volume do tanque (m³)", 0.1, value=100.0)
             vazao = None
         else:
             vazao = st.number_input("Vazão (m³/h)", 0.01, value=10.0)
-            volume_tanque = None
+            volume = None
 
-    col4, col5 = st.columns(2)
+    reagente = st.selectbox("Reagente", list(REAGENTES.keys()))
 
-    with col4:
-        reagente = st.selectbox("Reagente", list(REAGENTES.keys()))
-
-    with col5:
-        alcalinidade = st.number_input("Alcalinidade (mg CaCO₃/L)", 0.0, value=200.0)
-
-    calcular = st.button("Calcular dosagem", use_container_width=True)
+    calcular = st.button("Calcular dosagem")
 
     if not calcular:
         return
 
-    # =============================
-    # VALIDAÇÃO
-    # =============================
-    delta_ph = ph_alvo - ph_atual
+    delta = ph_alvo - ph_atual
     cfg = REAGENTES[reagente]
 
-    if delta_ph < 0 and cfg["tipo"] == "base":
-        st.error("Para baixar o pH use um ácido.")
+    # VALIDAÇÃO
+    if delta < 0 and cfg["tipo"] == "base":
+        st.error("Use ácido para baixar o pH")
+        return
+    if delta > 0 and cfg["tipo"] == "acido":
+        st.error("Use base para subir o pH")
         return
 
-    if delta_ph > 0 and cfg["tipo"] == "acido":
-        st.error("Para subir o pH use uma base.")
-        return
-
-    # =============================
-    # CÁLCULO
-    # =============================
+    # CONCENTRAÇÃO
     conc_meq_mL = (cfg["pureza"] * cfg["densidade"] * 1000 / cfg["MM"]) * cfg["eq"]
 
-    demanda_meq_L = abs(delta_ph) * 0.1 + (alcalinidade / 50)
+    # MODELO SIMPLES (SEM ALCALINIDADE)
+    demanda_meq_L = abs(delta) * 0.2   # ajustável
 
-    dose_L_por_m3 = demanda_meq_L / conc_meq_mL
+    dose_L_m3 = demanda_meq_L / conc_meq_mL
 
     st.markdown("---")
-    st.subheader("📣 Resultado")
 
     # =============================
     # RESULTADO
     # =============================
-    if modo_batelada:
-        vol_produto_L = dose_L_por_m3 * volume_tanque
+    cor = cfg["cor"]
 
-        st.success(
-            f"Adicionar **{vol_produto_L:.2f} L** de {cfg['nome_curto']} no tanque"
-        )
+    if modo_batelada:
+        vol_L = dose_L_m3 * volume
+
+        st.markdown(f"""
+        <div style="background:{cor};padding:20px;border-radius:10px;color:white">
+            <h2>Adicionar {vol_L:.2f} L</h2>
+            <p>{cfg['nome_curto']} • tanque {volume} m³</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     else:
-        vazao_produto_L_h = dose_L_por_m3 * vazao
+        vazao_L_h = dose_L_m3 * vazao
 
-        st.success(
-            f"Dosar **{vazao_produto_L_h:.3f} L/h** de {cfg['nome_curto']} na linha"
-        )
+        st.markdown(f"""
+        <div style="background:{cor};padding:20px;border-radius:10px;color:white">
+            <h2>Dosar {vazao_L_h:.3f} L/h</h2>
+            <p>{cfg['nome_curto']} • linha contínua</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # =============================
+    # GRÁFICO CURVA pH
+    # =============================
+    st.markdown("---")
+    st.subheader("📈 Curva pH × Dosagem")
+
+    doses = np.linspace(0, dose_L_m3 * 2.5, 150)
+    phs = []
+
+    for d in doses:
+        efeito = d * conc_meq_mL
+        variacao = efeito * 0.05  # fator empírico
+        if cfg["tipo"] == "acido":
+            ph_est = ph_atual - variacao
+        else:
+            ph_est = ph_atual + variacao
+
+        phs.append(np.clip(ph_est, 0, 14))
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=doses,
+        y=phs,
+        mode="lines",
+        line=dict(color=cor, width=3)
+    ))
+
+    fig.add_hline(y=ph_alvo, line_color="green", line_dash="dash")
+    fig.add_vline(x=dose_L_m3, line_color="red", line_dash="dash")
+
+    fig.update_layout(
+        xaxis_title="Dose (L/m³)",
+        yaxis_title="pH",
+        height=350
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 
-# ✅ CHAMADA DA FUNÇÃO
+# CHAMADA
 render_correcao_ph()
