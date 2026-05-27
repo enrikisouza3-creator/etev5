@@ -1720,11 +1720,16 @@ def render_correcao_ph():
 
     with col3:
         if modo_batelada:
-            volume = st.number_input("Volume (m³)", 0.1, value=100.0)
+            volume = st.number_input("Volume do tanque (m³)", 0.1, value=100.0)
             vazao = None
         else:
             vazao = st.number_input("Vazão (m³/h)", 0.01, value=10.0)
             volume = None
+
+    # ✅ NOVO CAMPO (PRODUÇÃO)
+    acido_nitrico_L = st.number_input(
+        "Ácido nítrico da produção (L)", min_value=0.0, value=0.0
+    )
 
     calcular = st.button("Calcular")
 
@@ -1732,6 +1737,21 @@ def render_correcao_ph():
         return
 
     delta = ph_alvo - ph_atual
+
+    # =============================
+    # CONVERSÃO DO ÁCIDO NÍTRICO
+    # =============================
+    kg_nitrico = acido_nitrico_L * 1.33
+
+    mol_nitrico = (kg_nitrico * 1000) / 63.0
+    mol_ativo = mol_nitrico * 0.53
+
+    if modo_batelada:
+        volume_L = volume * 1000
+    else:
+        volume_L = vazao * 1000  # aproximação
+
+    efeito_nitrico = (mol_ativo * 1000) / volume_L if volume_L > 0 else 0
 
     # =============================
     # CONCENTRAÇÕES
@@ -1742,8 +1762,13 @@ def render_correcao_ph():
     conc_acido = (acido["pureza"] * acido["densidade"] * 1000 / acido["MM"]) * acido["eq"]
     conc_base  = (base["pureza"]  * base["densidade"]  * 1000 / base["MM"])  * base["eq"]
 
-    # DEMANDA (modelo simples)
+    # =============================
+    # DEMANDA
+    # =============================
     demanda = abs(delta) * 0.2
+
+    # 🔥 AQUI ENTRA O IMPACTO DO NÍTRICO
+    demanda = max(demanda - efeito_nitrico, 0)
 
     dose_acido = demanda / conc_acido
     dose_base  = demanda / conc_base
@@ -1763,40 +1788,30 @@ def render_correcao_ph():
     colA, colB = st.columns(2)
 
     with colA:
-        st.markdown(f"""
-        <div style="background:#EF5350;padding:15px;border-radius:8px;color:white">
-            <b>{acido['nome']}</b><br>
-            {val_acido:.2f} {"L" if modo_batelada else "L/h"}
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Ácido (L)" if modo_batelada else "Ácido (L/h)", f"{val_acido:.2f}")
 
     with colB:
-        st.markdown(f"""
-        <div style="background:#42A5F5;padding:15px;border-radius:8px;color:white">
-            <b>{base['nome']}</b><br>
-            {val_base:.2f} {"L" if modo_batelada else "L/h"}
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Soda (L)" if modo_batelada else "Soda (L/h)", f"{val_base:.2f}")
 
     # =============================
-    # QUAL USAR (AUTOMÁTICO)
+    # QUAL USAR
     # =============================
     if delta < 0:
-        st.success(f"✅ Usar: {acido['nome']}")
+        st.success("✅ Usar ÁCIDO")
         cor = acido["cor"]
         conc = conc_acido
         direcao = -1
         dose_ref = dose_acido
 
     elif delta > 0:
-        st.success(f"✅ Usar: {base['nome']}")
+        st.success("✅ Usar SODA")
         cor = base["cor"]
         conc = conc_base
         direcao = 1
         dose_ref = dose_base
 
     else:
-        st.info("pH já está correto")
+        st.info("pH já está ideal")
         return
 
     # =============================
