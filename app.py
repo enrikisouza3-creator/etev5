@@ -1675,14 +1675,39 @@ render_microbiologia()
 #   CORREÇÃO DE pH — CALCULADORA DE DOSAGEM
 # =============================================================================
 
+REAGENTES = {
+    "H₂SO₄ 60% (ácido sulfúrico)": {
+        "tipo": "acido",
+        "MM": 98.08,
+        "pureza": 0.60,
+        "densidade": 1.50,
+        "eq": 2,
+        "nome_curto": "ácido 60%",
+    },
+    "NaOH 15% (soda cáustica)": {
+        "tipo": "base",
+        "MM": 40.00,
+        "pureza": 0.15,
+        "densidade": 1.16,
+        "eq": 1,
+        "nome_curto": "soda 15%",
+    }
+}
+
+
 def render_correcao_ph():
+
     st.markdown("---")
     st.header("⚗️ Correção de pH — Calculadora de Dosagem")
+
     st.caption(
         "Informe os parâmetros do seu tanque ou linha e receba a resposta direta: "
         "**quanto produto dosar** para atingir o pH alvo."
     )
 
+    # =============================
+    # MODO
+    # =============================
     modo_op = st.radio(
         "Modo de operação",
         ["Tanque (dosagem única)", "Linha (dosagem contínua)"],
@@ -1691,49 +1716,81 @@ def render_correcao_ph():
 
     modo_batelada = "Tanque" in modo_op
 
+    # =============================
+    # ENTRADAS
+    # =============================
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        ph_atual = st.number_input("pH atual (medido)", 0.0, 14.0, 8.5, 0.1)
+        ph_atual = st.number_input("pH atual", 0.0, 14.0, 8.5, 0.1)
+
     with col2:
-        ph_alvo = st.number_input("pH alvo (desejado)", 0.0, 14.0, 7.0, 0.1)
+        ph_alvo = st.number_input("pH alvo", 0.0, 14.0, 7.0, 0.1)
+
     with col3:
         if modo_batelada:
             volume_tanque = st.number_input("Volume do tanque (m³)", 0.1, value=100.0)
             vazao = None
         else:
-            vazao = st.number_input("Vazão da linha (m³/h)", 0.01, value=10.0)
+            vazao = st.number_input("Vazão (m³/h)", 0.01, value=10.0)
             volume_tanque = None
 
-    reagente = st.selectbox("Reagente disponível", list(REAGENTES.keys()))
-    alcalinidade = st.number_input("Alcalinidade (mg CaCO₃/L)", 0.0, value=200.0)
+    col4, col5 = st.columns(2)
+
+    with col4:
+        reagente = st.selectbox("Reagente", list(REAGENTES.keys()))
+
+    with col5:
+        alcalinidade = st.number_input("Alcalinidade (mg CaCO₃/L)", 0.0, value=200.0)
 
     calcular = st.button("Calcular dosagem", use_container_width=True)
 
     if not calcular:
         return
 
+    # =============================
+    # VALIDAÇÃO
+    # =============================
     delta_ph = ph_alvo - ph_atual
     cfg = REAGENTES[reagente]
 
-    precisa_acido = delta_ph < 0
+    if delta_ph < 0 and cfg["tipo"] == "base":
+        st.error("Para baixar o pH use um ácido.")
+        return
 
+    if delta_ph > 0 and cfg["tipo"] == "acido":
+        st.error("Para subir o pH use uma base.")
+        return
+
+    # =============================
+    # CÁLCULO
+    # =============================
     conc_meq_mL = (cfg["pureza"] * cfg["densidade"] * 1000 / cfg["MM"]) * cfg["eq"]
 
-    # cálculo simplificado mantido
     demanda_meq_L = abs(delta_ph) * 0.1 + (alcalinidade / 50)
 
     dose_L_por_m3 = demanda_meq_L / conc_meq_mL
 
     st.markdown("---")
+    st.subheader("📣 Resultado")
 
+    # =============================
+    # RESULTADO
+    # =============================
     if modo_batelada:
         vol_produto_L = dose_L_por_m3 * volume_tanque
 
-        st.subheader("📣 Resultado")
-        st.success(f"Adicionar **{vol_produto_L:.2f} L** de {cfg['nome_curto']} no tanque")
+        st.success(
+            f"Adicionar **{vol_produto_L:.2f} L** de {cfg['nome_curto']} no tanque"
+        )
 
     else:
         vazao_produto_L_h = dose_L_por_m3 * vazao
 
-        st.subheader("📣 Resultado")
-        st.success(f"Dosar **{vazao_produto_L_h:.3f} L/h** de {cfg['nome_curto']} na linha")
+        st.success(
+            f"Dosar **{vazao_produto_L_h:.3f} L/h** de {cfg['nome_curto']} na linha"
+        )
+
+
+# ✅ CHAMADA DA FUNÇÃO
+render_correcao_ph()
