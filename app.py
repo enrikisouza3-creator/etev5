@@ -1697,19 +1697,14 @@ REAGENTES = {
     }
 }
 
-
 def render_correcao_ph():
 
     st.markdown("---")
     st.header("⚗️ Correção de pH")
 
-    modo = st.radio(
-        "Modo",
-        ["Tanque (dosagem única)", "Linha (dosagem contínua)"],
-        horizontal=True,
-    )
-    modo_batelada = "Tanque" in modo
-
+    # =============================
+    # ENTRADAS — só o que importa
+    # =============================
     col1, col2, col3 = st.columns(3)
     with col1:
         ph_atual = st.number_input("pH atual", 0.0, 14.0, 12.0, 0.1)
@@ -1718,41 +1713,28 @@ def render_correcao_ph():
     with col3:
         vazao = st.number_input("Vazão de trabalho (m³/h)", 0.01, value=10.0)
 
-    if modo_batelada:
-        tempo_h = st.number_input("Tempo de enchimento do tanque (h)", 0.1, value=1.0, step=0.5)
-        volume = vazao * tempo_h
-        st.caption(f"📦 Volume total do tanque: **{volume:.1f} m³**")
-    else:
-        tempo_h = None
-        volume  = None
-
     acido_nitrico_L = st.number_input(
         "Ácido nítrico da produção (L)", min_value=0.0, value=0.0
     )
 
-    calcular = st.button("Calcular")
+    calcular = st.button("Calcular", type="primary", use_container_width=True)
     if not calcular:
         return
 
     # =============================
-    # VOLUME DE REFERÊNCIA
-    # =============================
-    vol_m3 = volume if modo_batelada else vazao
-    vol_L  = vol_m3 * 1000
-
-    # =============================
     # PASSO 1 — impacto do nítrico
     # =============================
-    kg_nitrico   = acido_nitrico_L * 1.33
-    mol_nitrico  = (kg_nitrico * 1000) / 63.0
-    mol_ativo    = mol_nitrico * 0.53
-    meqL_nitrico = (mol_ativo * 1000) / vol_L if vol_L > 0 else 0.0
+    vol_L = vazao * 1000
 
-    delta_ph_nitrico = meqL_nitrico / 0.2
-    ph_apos_nitrico  = float(np.clip(ph_atual - delta_ph_nitrico, 0, 14))
+    kg_nitrico      = acido_nitrico_L * 1.33
+    mol_nitrico     = (kg_nitrico * 1000) / 63.0
+    mol_ativo       = mol_nitrico * 0.53
+    meqL_nitrico    = (mol_ativo * 1000) / vol_L if vol_L > 0 else 0.0
+    delta_nitrico   = meqL_nitrico / 0.2
+    ph_apos_nitrico = float(np.clip(ph_atual - delta_nitrico, 0, 14))
 
     # =============================
-    # PASSO 2 — o que ainda falta
+    # PASSO 2 — demanda restante
     # =============================
     delta_restante = ph_alvo - ph_apos_nitrico
 
@@ -1761,64 +1743,95 @@ def render_correcao_ph():
     conc_acido = (acido["pureza"] * acido["densidade"] * 1000 / acido["MM"]) * acido["eq"]
     conc_base  = (base["pureza"]  * base["densidade"]  * 1000 / base["MM"])  * base["eq"]
 
-    demanda      = abs(delta_restante) * 0.2
-    dose_acido   = demanda / conc_acido   # L/m³
-    dose_base    = demanda / conc_base    # L/m³
+    demanda    = abs(delta_restante) * 0.2
+    dose_acido = demanda / conc_acido  # L/m³
+    dose_base  = demanda / conc_base   # L/m³
 
-    unidade      = "L"    if modo_batelada else "L/h"
-    val_acido    = dose_acido * vol_m3
-    val_base     = dose_base  * vol_m3
+    # volume total tratado em 1h
+    val_acido_h = dose_acido * vazao   # L/h
+    val_base_h  = dose_base  * vazao   # L/h
 
     # =============================
-    # PASSO 3 — DECISÃO
+    # PASSO 3 — DECISÃO AUTOMÁTICA
+    # sistema decide modo e reagente
+    # =============================
+
+    # pH ok
+    if abs(delta_restante) < 0.05:
+        st.success("✅ pH já está no alvo. Nenhuma dosagem necessária.")
+        return
+
+    # precisa de ácido
+    if delta_restante < 0:
+        reagente    = "acido"
+        nome_prod   = acido["nome"]
+        cor         = acido["cor"]
+        dose_ref    = dose_acido
+        val_hora    = val_acido_h
+        direcao     = -1
+        conc        = conc_acido
+    # precisa de soda
+    else:
+        reagente    = "base"
+        nome_prod   = base["nome"]
+        cor         = base["cor"]
+        dose_ref    = dose_base
+        val_hora    = val_base_h
+        direcao     = 1
+        conc        = conc_base
+
+    # sistema decide o modo automaticamente
+    # desvio grande (>2 unidades) ou vazão baixa → dosagem única
+    # desvio pequeno e vazão alta → contínua
+    if abs(delta_restante) >= 2.0 or vazao <= 20.0:
+        modo_auto     = "unica"
+        tempo_trat_h  = 1.0
+        vol_total     = vazao * tempo_trat_h
+        val_total     = dose_ref * vol_total
+    else:
+        modo_auto    = "continua"
+        val_total    = val_hora
+
+    # =============================
+    # RESULTADO VISUAL
     # =============================
     st.markdown("---")
 
-    # Bloco de impacto do nítrico
+    # impacto do nítrico
     if acido_nitrico_L > 0:
         st.markdown(
             f"""<div style="background:#37474F;padding:14px;border-radius:8px;
                 color:white;margin-bottom:12px">
-                <b>🧪 Impacto do ácido nítrico</b><br>
-                pH antes do nítrico: <b>{ph_atual}</b><br>
-                pH após o nítrico:   <b>{ph_apos_nitrico:.2f}</b><br>
-                Deslocamento:        <b>−{delta_ph_nitrico:.2f} unidades</b>
+                <b>🧪 Impacto do ácido nítrico da produção</b><br>
+                pH entrada: <b>{ph_atual}</b> →
+                pH após nítrico: <b>{ph_apos_nitrico:.2f}</b>
+                (deslocou <b>{delta_nitrico:.2f}</b> unidades)
             </div>""",
             unsafe_allow_html=True
         )
 
-    # Decisão
-    if abs(delta_restante) < 0.05:
-        st.success("✅ O ácido nítrico já corrigiu o pH para o alvo. Nenhuma dosagem necessária.")
-        reagente_usado = None
-        val_usar       = 0.0
-        nome_reagente  = "—"
-    elif delta_restante < 0:
-        st.error(f"🔴 pH ainda em **{ph_apos_nitrico:.2f}** após o nítrico → usar **ÁCIDO**")
-        reagente_usado = "acido"
-        val_usar       = val_acido
-        nome_reagente  = acido["nome"]
-        cor            = acido["cor"]
-        dose_ref       = dose_acido
-        direcao        = -1
-        conc           = conc_acido
-    else:
-        st.warning(f"⚠️ Nítrico passou do alvo → pH foi para **{ph_apos_nitrico:.2f}** → usar **SODA**")
-        reagente_usado = "base"
-        val_usar       = val_base
-        nome_reagente  = base["nome"]
-        cor            = base["cor"]
-        dose_ref       = dose_base
-        direcao        = 1
-        conc           = conc_base
+    # card do resultado
+    modo_texto = "dosagem única no tanque" if modo_auto == "unica" else "dosagem contínua em linha"
+    st.markdown(
+        f"""<div style="background:{cor};padding:20px;border-radius:10px;
+            color:white;margin-bottom:16px">
+            <div style="font-size:22px;font-weight:700">
+                {'🔴' if reagente == 'acido' else '🔵'} {nome_prod}
+            </div>
+            <div style="font-size:28px;font-weight:900;margin:10px 0">
+                {val_total:.2f} {'L' if modo_auto == 'unica' else 'L/h'}
+            </div>
+            <div style="font-size:14px;opacity:0.9">
+                Modo: {modo_texto}
+            </div>
+        </div>""",
+        unsafe_allow_html=True
+    )
 
-    # Métricas lado a lado
+    # os dois valores sempre visíveis
     col1, col2 = st.columns(2)
-    col1.metric(f"Ácido sulfúrico ({unidade})", f"{val_acido:.2f}")
-    col2.metric(f"Soda cáustica ({unidade})",   f"{val_base:.2f}")
-
-    if reagente_usado is None:
-        return
+    col1.metric("Ácido sulfúrico", f"{dose_acido * vazao:.2f} L/h")
+    col2.metric("Soda cáustica",   f"{dose_base  * vazao:.2f} L/h")
 
     # =============================
     # GRÁFICO
@@ -1832,8 +1845,7 @@ def render_correcao_ph():
     for d in doses:
         fracao   = (d / dose_ref) if dose_ref > 0 else 0.0
         variacao = delta_restante * (1 / (1 + np.exp(-6 * (fracao - 0.5))))
-        ph_est   = ph_apos_nitrico + variacao
-        phs.append(float(np.clip(ph_est, 0, 14)))
+        phs.append(float(np.clip(ph_apos_nitrico + variacao, 0, 14)))
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -1846,7 +1858,7 @@ def render_correcao_ph():
         x=[0], y=[ph_apos_nitrico],
         mode="markers",
         marker=dict(color="orange", size=12),
-        name=f"pH após nítrico ({ph_apos_nitrico:.2f})"
+        name=f"pH atual ({ph_apos_nitrico:.2f})"
     ))
     fig.add_hline(
         y=ph_alvo, line_color="green", line_dash="dash",
@@ -1868,57 +1880,58 @@ def render_correcao_ph():
     st.plotly_chart(fig, use_container_width=True)
 
     # =============================
-    # RELATÓRIO AUTOMÁTICO
+    # RELATÓRIO
     # =============================
     st.markdown("---")
     st.subheader("🧾 Relatório Operacional")
 
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    if modo_batelada:
+    motivo_nitrico = (
+        f"Foram informados {acido_nitrico_L:.0f} L de ácido nítrico "
+        f"adicionados pela produção, deslocando o pH de {ph_atual} para "
+        f"{ph_apos_nitrico:.2f}. "
+    ) if acido_nitrico_L > 0 else ""
+
+    if modo_auto == "unica":
         relatorio = f"""📋 RELATÓRIO DE CORREÇÃO DE pH
 Data/Hora: {agora}
 
 SITUAÇÃO:
-Devido ao pH do efluente estar em {ph_atual}, acima do valor alvo de {ph_alvo}, {'e considerando que foram adicionados ' + str(acido_nitrico_L) + ' L de ácido nítrico pela produção, reduzindo o pH para ' + str(round(ph_apos_nitrico, 2)) + ',' if acido_nitrico_L > 0 else ''} é aconselhável a aplicação de {nome_reagente} diretamente no tanque.
+O efluente chegou com pH {ph_atual}, acima do valor alvo de {ph_alvo}. {motivo_nitrico}Devido ao desvio de {abs(delta_restante):.2f} unidades de pH, o sistema recomenda dosagem única diretamente no tanque.
 
-DOSAGEM:
-→ Volume do tanque: {volume:.1f} m³
-→ Reagente: {nome_reagente}
-→ Quantidade a aplicar: {val_usar:.2f} L
+REAGENTE: {nome_prod}
+QUANTIDADE: {val_total:.2f} L
 
 PROCEDIMENTO:
-1. Confirmar volume do tanque ({volume:.1f} m³)
-2. Adicionar {val_usar:.2f} L de {nome_reagente} no tanque
-3. Aguardar homogeneização (mínimo 15 min)
-4. Medir pH e confirmar resultado
-5. Se necessário, repetir dosagem em pequenas partes
+1. Adicionar {val_total:.2f} L de {nome_prod} no tanque
+2. Aguardar homogeneização (mínimo 15 min)
+3. Medir o pH e confirmar resultado
+4. Se necessário, repetir em pequenas partes
 
-⚠️ Medir o pH após aplicação para confirmar o resultado."""
+⚠️ Sempre medir o pH após aplicação."""
 
     else:
         relatorio = f"""📋 RELATÓRIO DE CORREÇÃO DE pH
 Data/Hora: {agora}
 
 SITUAÇÃO:
-Devido ao pH do efluente estar em {ph_atual}, acima do valor alvo de {ph_alvo}, {'e considerando que foram adicionados ' + str(acido_nitrico_L) + ' L de ácido nítrico pela produção, reduzindo o pH para ' + str(round(ph_apos_nitrico, 2)) + ',' if acido_nitrico_L > 0 else ''} é necessário dosar {nome_reagente} em linha contínua.
+O efluente chegou com pH {ph_atual}, acima do valor alvo de {ph_alvo}. {motivo_nitrico}Devido ao desvio de {abs(delta_restante):.2f} unidades de pH e vazão de {vazao:.1f} m³/h, o sistema recomenda dosagem contínua em linha.
 
-DOSAGEM:
-→ Vazão de trabalho: {vazao:.1f} m³/h
-→ Reagente: {nome_reagente}
-→ Vazão de dosagem: {val_usar:.2f} L/h
-→ Duração estimada: até estabilização do pH em {ph_alvo}
+REAGENTE: {nome_prod}
+VAZÃO DE DOSAGEM: {val_total:.2f} L/h
 
 PROCEDIMENTO:
-1. Ajustar bomba dosadora para {val_usar:.2f} L/h de {nome_reagente}
+1. Ajustar bomba dosadora para {val_total:.2f} L/h de {nome_prod}
 2. Monitorar pH a cada 30 minutos
 3. Ajustar dosagem conforme necessário
 4. Registrar pH de entrada e saída
 
 ⚠️ Monitorar continuamente até pH estabilizar em {ph_alvo}."""
 
-    st.text_area("", value=relatorio, height=320, label_visibility="collapsed")
-    st.caption("Ctrl+A → Ctrl+C para copiar e enviar.")
+    st.text_area("", value=relatorio, height=300,
+                 label_visibility="collapsed")
+    st.caption("Ctrl+A → Ctrl+C para copiar.")
 
 
 # CHAMADA
