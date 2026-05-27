@@ -1678,22 +1678,20 @@ import numpy as np
 import plotly.graph_objects as go
 
 REAGENTES = {
-    "H₂SO₄ 60% (ácido sulfúrico)": {
-        "tipo": "acido",
+    "acido": {
         "MM": 98.08,
         "pureza": 0.60,
         "densidade": 1.50,
         "eq": 2,
-        "nome_curto": "ácido 60%",
+        "nome": "Ácido sulfúrico 60%",
         "cor": "#EF5350"
     },
-    "NaOH 15% (soda cáustica)": {
-        "tipo": "base",
+    "base": {
         "MM": 40.00,
         "pureza": 0.15,
         "densidade": 1.16,
         "eq": 1,
-        "nome_curto": "soda 15%",
+        "nome": "Soda cáustica 15%",
         "cor": "#42A5F5"
     }
 }
@@ -1702,7 +1700,7 @@ REAGENTES = {
 def render_correcao_ph():
 
     st.markdown("---")
-    st.header("⚗️ Correção de pH — Calculadora")
+    st.header("⚗️ Correção de pH")
 
     modo = st.radio(
         "Modo",
@@ -1722,82 +1720,98 @@ def render_correcao_ph():
 
     with col3:
         if modo_batelada:
-            volume = st.number_input("Volume do tanque (m³)", 0.1, value=100.0)
+            volume = st.number_input("Volume (m³)", 0.1, value=100.0)
             vazao = None
         else:
             vazao = st.number_input("Vazão (m³/h)", 0.01, value=10.0)
             volume = None
 
-    reagente = st.selectbox("Reagente", list(REAGENTES.keys()))
-
-    calcular = st.button("Calcular dosagem")
+    calcular = st.button("Calcular")
 
     if not calcular:
         return
 
     delta = ph_alvo - ph_atual
-    cfg = REAGENTES[reagente]
 
-    # VALIDAÇÃO
-    if delta < 0 and cfg["tipo"] == "base":
-        st.error("Use ácido para baixar o pH")
-        return
-    if delta > 0 and cfg["tipo"] == "acido":
-        st.error("Use base para subir o pH")
-        return
+    # =============================
+    # CONCENTRAÇÕES
+    # =============================
+    acido = REAGENTES["acido"]
+    base = REAGENTES["base"]
 
-    # CONCENTRAÇÃO
-    conc_meq_mL = (cfg["pureza"] * cfg["densidade"] * 1000 / cfg["MM"]) * cfg["eq"]
+    conc_acido = (acido["pureza"] * acido["densidade"] * 1000 / acido["MM"]) * acido["eq"]
+    conc_base  = (base["pureza"]  * base["densidade"]  * 1000 / base["MM"])  * base["eq"]
 
-    # MODELO SIMPLES (SEM ALCALINIDADE)
-    demanda_meq_L = abs(delta) * 0.2   # ajustável
+    # DEMANDA (modelo simples)
+    demanda = abs(delta) * 0.2
 
-    dose_L_m3 = demanda_meq_L / conc_meq_mL
+    dose_acido = demanda / conc_acido
+    dose_base  = demanda / conc_base
 
     st.markdown("---")
 
     # =============================
-    # RESULTADO
+    # RESULTADOS
     # =============================
-    cor = cfg["cor"]
-
     if modo_batelada:
-        vol_L = dose_L_m3 * volume
+        val_acido = dose_acido * volume
+        val_base  = dose_base * volume
+    else:
+        val_acido = dose_acido * vazao
+        val_base  = dose_base * vazao
 
+    colA, colB = st.columns(2)
+
+    with colA:
         st.markdown(f"""
-        <div style="background:{cor};padding:20px;border-radius:10px;color:white">
-            <h2>Adicionar {vol_L:.2f} L</h2>
-            <p>{cfg['nome_curto']} • tanque {volume} m³</p>
+        <div style="background:#EF5350;padding:15px;border-radius:8px;color:white">
+            <b>{acido['nome']}</b><br>
+            {val_acido:.2f} {"L" if modo_batelada else "L/h"}
         </div>
         """, unsafe_allow_html=True)
+
+    with colB:
+        st.markdown(f"""
+        <div style="background:#42A5F5;padding:15px;border-radius:8px;color:white">
+            <b>{base['nome']}</b><br>
+            {val_base:.2f} {"L" if modo_batelada else "L/h"}
+        </div>
+        """, unsafe_allow_html=True)
+
+    # =============================
+    # QUAL USAR (AUTOMÁTICO)
+    # =============================
+    if delta < 0:
+        st.success(f"✅ Usar: {acido['nome']}")
+        cor = acido["cor"]
+        conc = conc_acido
+        direcao = -1
+        dose_ref = dose_acido
+
+    elif delta > 0:
+        st.success(f"✅ Usar: {base['nome']}")
+        cor = base["cor"]
+        conc = conc_base
+        direcao = 1
+        dose_ref = dose_base
 
     else:
-        vazao_L_h = dose_L_m3 * vazao
-
-        st.markdown(f"""
-        <div style="background:{cor};padding:20px;border-radius:10px;color:white">
-            <h2>Dosar {vazao_L_h:.3f} L/h</h2>
-            <p>{cfg['nome_curto']} • linha contínua</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.info("pH já está correto")
+        return
 
     # =============================
-    # GRÁFICO CURVA pH
+    # GRÁFICO
     # =============================
     st.markdown("---")
     st.subheader("📈 Curva pH × Dosagem")
 
-    doses = np.linspace(0, dose_L_m3 * 2.5, 150)
+    doses = np.linspace(0, dose_ref * 2.5, 150)
     phs = []
 
     for d in doses:
-        efeito = d * conc_meq_mL
-        variacao = efeito * 0.05  # fator empírico
-        if cfg["tipo"] == "acido":
-            ph_est = ph_atual - variacao
-        else:
-            ph_est = ph_atual + variacao
-
+        efeito = d * conc
+        variacao = efeito * 0.05
+        ph_est = ph_atual + (direcao * variacao)
         phs.append(np.clip(ph_est, 0, 14))
 
     fig = go.Figure()
@@ -1810,7 +1824,7 @@ def render_correcao_ph():
     ))
 
     fig.add_hline(y=ph_alvo, line_color="green", line_dash="dash")
-    fig.add_vline(x=dose_L_m3, line_color="red", line_dash="dash")
+    fig.add_vline(x=dose_ref, line_color="red", line_dash="dash")
 
     fig.update_layout(
         xaxis_title="Dose (L/m³)",
