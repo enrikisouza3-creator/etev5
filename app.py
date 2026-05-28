@@ -1723,13 +1723,13 @@ def render_correcao_ph():
     # O nítrico é diluído no volume de 1h de vazão
     # ex: 1700L nítrico em 1500 m³ = 1.500.000 L → concentração baixa
     # =============================
-    acido_nitrico_kg = acido_nitrico_L * 1.33
+    acido_nitrico_kg = acido_nitrico_L * 1.53
 
     vol_efluente_L   = vazao * 1000           # L de efluente por hora
 
-    # mol de HNO3 puro (63% ativo, MM=63)
-    kg_hno3_puro     = acido_nitrico_kg * 0.63
-    mol_hno3         = (kg_hno3_puro * 1000) / 63.0
+    # mol de HNO3 puro (50% ativo, MM=63)
+    kg_hno3_puro     = acido_nitrico_kg * 0.50
+    mol_hno3         = (kg_hno3_puro * 1000) / 50
 
     # concentração no efluente (mmol/L = meq/L pois HNO3 é monoprótico)
     conc_hno3_meqL   = (mol_hno3 * 1000) / vol_efluente_L if vol_efluente_L > 0 else 0.0
